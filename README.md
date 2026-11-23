@@ -11,7 +11,11 @@
 Go, PostgreSQL, Redis, Kafka, Docker Compose, Prometheus, Grafana (позже Kubernetes)
 
 ## Запуск
-Скоро: `docker compose -f deploy/docker-compose.yml up`
+```bash
+cp deploy/.env.example deploy/.env
+docker compose -f deploy/docker-compose.yml up -d
+```
+Postgres доступен на `localhost:5433`, Kafka на `localhost:9092`.
 
 ## Архитектура
 Скоро: схема сервисов и событий.
