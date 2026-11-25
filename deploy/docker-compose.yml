@@ -23,5 +23,12 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+  bot-gateway:
+    build:
+      context: ../services/bot-gateway
+      dockerfile: Dockerfile
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      HTTPS_PROXY: ${BOT_HTTPS_PROXY:-}
 volumes:
   pgdata:
