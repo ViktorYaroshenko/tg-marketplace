@@ -10,8 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 type Chat struct {
@@ -22,6 +26,7 @@ type Message struct {
 	MessageID int64  `json:"message_id"`
 	Chat      Chat   `json:"chat"`
 	Text      string `json:"text"`
+	Date      int64  `json:"date"`
 }
 
 type Update struct {
@@ -55,6 +60,28 @@ func main() {
 	if token == "" {
 		log.Fatal("TELEGRAM_BOT_TOKEN is not set or empty")
 	}
+
+	broker := os.Getenv("KAFKA_BROKER")
+	if broker == "" {
+		log.Fatal("KAFKA_BROKER is not set")
+	}
+
+	topic := os.Getenv("KAFKA_TOPIC")
+	if topic == "" {
+		log.Fatal("KAFKA_TOPIC is not set")
+	}
+
+	botID, err := strconv.ParseInt(
+		strings.SplitN(token, ":", 2)[0],
+		10,
+		64,
+	)
+	if err != nil || botID <= 0 {
+		log.Fatal("invalid Telegram bot ID")
+	}
+
+	writer := newProducer(broker, topic)
+	defer writer.Close()
 
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -101,6 +128,40 @@ func main() {
 			}
 
 			log.Println("Update ID:", update.UpdateID)
+
+			if update.Message == nil {
+				offset = update.UpdateID + 1
+				continue
+			}
+
+			words := strings.Fields(update.Message.Text)
+
+			if len(words) > 0 && words[0] == "/add" {
+				err := handleAddCommand(
+					ctx,
+					client,
+					writer,
+					token,
+					botID,
+					update,
+				)
+
+				if err != nil {
+					log.Println(err)
+
+					select {
+					case <-ctx.Done():
+						log.Println("Bot stopped")
+						return
+					case <-time.After(3 * time.Second):
+					}
+
+					break
+				}
+
+				offset = update.UpdateID + 1
+				continue
+			}
 
 			if update.Message != nil && update.Message.Text == "/start" {
 				err := sendMessage(
@@ -230,6 +291,82 @@ func sendMessage(ctx context.Context, client *http.Client, token string, chatID 
 
 	if !result.OK {
 		return fmt.Errorf("Telegram API returned an error")
+	}
+
+	return nil
+}
+
+func handleAddCommand(
+	ctx context.Context,
+	client *http.Client,
+	writer *kafka.Writer,
+	token string,
+	botID int64,
+	update Update,
+) error {
+	productName, quantity, err := parseAddCommand(
+		update.Message.Text,
+	)
+
+	if err != nil {
+		replyErr := sendMessage(
+			ctx,
+			client,
+			token,
+			update.Message.Chat.ID,
+			"Используйте формат: /add Название Количество",
+		)
+		if replyErr != nil {
+			log.Println(replyErr)
+		}
+
+		return nil
+	}
+
+	event := newStockAddEvent(
+		botID,
+		update.UpdateID,
+		productName,
+		quantity,
+		time.Unix(update.Message.Date, 0).UTC(),
+	)
+
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to encode event: %w", err)
+	}
+
+	publishCtx, cancel := context.WithTimeout(
+		ctx,
+		15*time.Second,
+	)
+	defer cancel()
+
+	err = publishEvent(
+		publishCtx,
+		writer,
+		productName,
+		body,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish event: %w", err)
+	}
+
+	log.Println("Event published:", event.EventID)
+
+	err = sendMessage(
+		ctx,
+		client,
+		token,
+		update.Message.Chat.ID,
+		fmt.Sprintf(
+			"Запрос на добавление принят: %s — %d шт.",
+			productName,
+			quantity,
+		),
+	)
+	if err != nil {
+		log.Println("Failed to send confirmation:", err)
 	}
 
 	return nil
